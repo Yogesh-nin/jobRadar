@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "default": {
+      "title_keywords": ["frontend", "react", "javascript", "ui engineer", "web engineer", "full stack", "typescript", "next.js", "backend"],
+      "description_keywords": ["react", "javascript", "typescript", "next.js", "css", "html", "frontend", "ui engineer", "web engineer", "full stack"],
+      "exclude_keywords": ["java", ".net", "ios", "android", "embedded"],
+      "min_score": 1
+    }
+  },
+  "active_profile": "default"
+}

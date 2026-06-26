@@ -1,0 +1,14 @@
+{
+  "name": "job-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node scrape.js",
+    "scrape": "node scrape.js"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0",
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0"
+  }
+}
