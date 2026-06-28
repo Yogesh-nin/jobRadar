@@ -102,7 +102,33 @@ You can define multiple profiles and switch between them by changing `active_pro
 }
 ```
 
-### 4. (Optional) Set up RapidAPI for fallback search
+### 4. Set up Telegram notifications
+
+The scraper sends a daily digest of new relevant jobs to a Telegram bot.
+
+**Step 1 — Create a bot:**
+1. Open Telegram and message `@BotFather`
+2. Send `/newbot` and follow the prompts to get a **bot token**
+
+**Step 2 — Get your chat ID:**
+1. Start a chat with your new bot (search for it and hit Start)
+2. Open this URL in your browser (replace with your token):
+   ```
+   https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+   ```
+3. Find `"chat"` → `"id"` in the response — that's your chat ID
+
+**Step 3 — Add to `.env`:**
+```
+TELEGRAM_BOT_TOKEN=123456789:ABCdef...
+TELEGRAM_CHAT_ID=987654321
+```
+
+After each run, you'll receive one or more Telegram messages with all new relevant jobs (batched 10 per message). If no new jobs are found, you'll get a short "no new jobs today" message so you know the scraper ran.
+
+---
+
+### 5. (Optional) Set up RapidAPI for fallback search
 
 If a company's career page fails to scrape, the scraper can fall back to the [JSearch API](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) on RapidAPI as a last resort.
 
@@ -125,7 +151,63 @@ This is optional — scraping works fine without it. The fallback is only trigge
 
 ---
 
-## Running
+## Automated Daily Scheduling (Windows)
+
+The scraper can run automatically every day using Windows Task Scheduler. It handles two failure cases out of the box:
+- **Laptop was closed at the scheduled time** — runs as soon as the laptop wakes up
+- **No network at startup** — waits up to 5 minutes for a connection before starting
+
+### Setup (one-time)
+
+1. Open **PowerShell as Administrator** (right-click Start → Terminal (Admin))
+2. Run the following command, adjusting the time to your preference:
+
+```powershell
+$scriptPath = "C:\path\to\job-scraper\run.ps1"
+
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+$trigger = New-ScheduledTaskTrigger -Daily -At "09:00AM"
+
+$settings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -RunOnlyIfNetworkAvailable:$false `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+
+Register-ScheduledTask -TaskName "JobScraper" `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -RunLevel Highest `
+    -Force
+```
+
+Replace `C:\path\to\job-scraper\run.ps1` with the actual path to `run.ps1` in this project.
+
+That's it — the task is now registered and runs automatically every day. You never need to touch PowerShell again unless you want to change the schedule time.
+
+### Logs
+
+Each run appends to `output/run.log`:
+```
+2026-06-28 09:00:05 - === Job Scraper task started ===
+2026-06-28 09:00:05 - Network available
+2026-06-28 09:00:05 - Running: node scrape.js
+2026-06-28 09:02:41 - Scraper exited with code 0
+2026-06-28 09:02:41 - === Done ===
+```
+
+### To remove the scheduled task
+
+```powershell
+Unregister-ScheduledTask -TaskName "JobScraper" -Confirm:$false
+```
+
+---
+
+## Running manually
 
 ```bash
 npm start
@@ -195,19 +277,23 @@ Each job entry looks like:
 ```
 job-scraper/
 ├── scrape.js                  # Main entry point
-├── companies.json             # List of companies to scrape
+├── run.ps1                    # Task Scheduler wrapper (network retry + logging)
+├── setup-task.ps1             # One-time script to register the Windows scheduled task
+├── companies/                 # Company lists (one JSON file per group)
 ├── keywords.json              # Keyword profiles and scoring config
 ├── seen.json                  # Auto-generated: tracks already-reported job IDs
 ├── .env                       # Your secrets (not committed)
 ├── .env.example               # Template — copy to .env and fill in keys
 ├── output/
 │   ├── jobs_YYYY-MM-DD.json   # Per-run results
-│   └── all_jobs.json          # Cumulative results
+│   ├── all_jobs.json          # Cumulative results
+│   └── run.log                # Auto-generated: log of every scheduled run
 └── src/
     ├── detector.js            # Auto-detects the right strategy for a company URL
     ├── normalizer.js          # Normalizes job fields across strategies
     ├── scorer.js              # Scores jobs against keyword profile
     ├── seen.js                # Reads/writes seen.json
+    ├── notifier.js            # Sends Telegram digest
     ├── noiseFilter.js         # Filters nav links and junk from scraped pages
     └── strategies/
         ├── static.js          # Plain HTML pages (axios + cheerio)

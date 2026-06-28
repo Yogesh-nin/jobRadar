@@ -1,10 +1,12 @@
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises'
+import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { detect } from './src/detector.js'
 import { normalize } from './src/normalizer.js'
 import { score as computeScore } from './src/scorer.js'
 import { loadSeen, isNew, markSeen, saveSeen } from './src/seen.js'
+import { sendTelegram } from './src/notifier.js'
 import * as ats from './src/strategies/ats/index.js'
 import { scrape as scrapeIntercept } from './src/strategies/intercept.js'
 import { scrape as scrapeDomwait } from './src/strategies/domwait.js'
@@ -17,7 +19,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // Load .env without an external dependency
 try {
   const env = await readFile(join(__dirname, '.env'), 'utf-8')
-  for (const line of env.split('\n')) {
+  for (const line of env.split(/\r?\n/)) {
     const m = line.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/)
     if (m) process.env[m[1]] ??= m[2].replace(/^["']|["']$/g, '').trim()
   }
@@ -67,6 +69,15 @@ async function withRateLimitRetry(fn) {
   }
 }
 
+function dedup(jobs) {
+  const seen = new Set()
+  return jobs.filter(j => {
+    if (seen.has(j.id)) return false
+    seen.add(j.id)
+    return true
+  })
+}
+
 function processJobs(normalizedJobs, seenMap, profile) {
   const newJobs = []
   for (const job of normalizedJobs) {
@@ -80,10 +91,78 @@ function processJobs(normalizedJobs, seenMap, profile) {
   return newJobs
 }
 
+function ask(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  return new Promise(resolve => rl.question(question, ans => { rl.close(); resolve(ans.trim()) }))
+}
+
+async function pickFiles(companiesDir, available) {
+  console.log(C.bold('\nAvailable company lists:'))
+  console.log(`  ${C.cyan('0.')} All`)
+  available.forEach((f, i) => console.log(`  ${C.cyan(`${i + 1}.`)} ${f.replace('.json', '')}`))
+  console.log()
+
+  const answer = await ask('Enter number (or 0 / Enter for all): ')
+  if (!answer || answer === '0') return available.map(f => join(companiesDir, f))
+
+  const picked = answer.split(/[\s,]+/).map(n => parseInt(n)).filter(n => n > 0 && n <= available.length)
+  if (picked.length === 0) return available.map(f => join(companiesDir, f))
+  return picked.map(n => join(companiesDir, available[n - 1]))
+}
+
+async function loadCompanies(root) {
+  const companiesDir = join(root, 'companies')
+  const args = process.argv.slice(2).filter(a => !a.startsWith('-'))
+
+  let filePaths = []
+  let useDir = false
+
+  try {
+    const available = (await readdir(companiesDir)).filter(f => f.endsWith('.json')).sort()
+    if (available.length > 0) {
+      useDir = true
+      if (args.length > 0) {
+        filePaths = args.map(a => join(companiesDir, a.endsWith('.json') ? a : `${a}.json`))
+      } else {
+        filePaths = await pickFiles(companiesDir, available)
+      }
+    }
+  } catch {}
+
+  if (!useDir) {
+    filePaths = [join(root, 'companies.json')]
+  }
+
+  const loaded = []
+  for (const filePath of filePaths) {
+    const entries = JSON.parse(await readFile(filePath, 'utf-8'))
+    for (const c of entries) c._sourceFile = filePath
+    loaded.push(...entries)
+  }
+
+  const fileList = filePaths.map(f => f.split(/[\\/]/).slice(-2).join('/')).join(', ')
+  console.log(C.dim(`Loaded ${loaded.length} companies from: ${fileList}`))
+  return loaded
+}
+
+async function saveCompanies(companiesData) {
+  const byFile = {}
+  for (const c of companiesData) {
+    if (!byFile[c._sourceFile]) byFile[c._sourceFile] = []
+    const { _sourceFile, ...rest } = c
+    byFile[c._sourceFile].push(rest)
+  }
+  for (const [filePath, companies] of Object.entries(byFile)) {
+    await writeFile(filePath, JSON.stringify(companies, null, 2))
+  }
+}
+
 async function main() {
   const now = new Date()
   const dateStr = now.toISOString().slice(0, 10)
   const timeStr = now.toISOString().replace('T', ' ').slice(0, 19)
+
+  const verbose = process.argv.includes('--verbose') || process.argv.includes('-v')
 
   console.log(C.bold(`\nJob Scraper — Starting run at ${timeStr}`))
   console.log('─'.repeat(50))
@@ -91,13 +170,13 @@ async function main() {
   const outputDir = join(__dirname, 'output')
   await mkdir(outputDir, { recursive: true })
 
-  const companiesPath = join(__dirname, 'companies.json')
-  const companiesData = JSON.parse(await readFile(companiesPath, 'utf-8'))
+  const companiesData = await loadCompanies(__dirname)
   const keywordsData  = JSON.parse(await readFile(join(__dirname, 'keywords.json'), 'utf-8'))
   const profile = keywordsData.profiles[keywordsData.active_profile]
   const seenMap = await loadSeen()
 
   const allNewJobs = []
+  const allFetchedJobs = []
   const total = companiesData.length
 
   for (let i = 0; i < total; i++) {
@@ -152,9 +231,10 @@ async function main() {
       if (rawJobs === null) rawJobs = []
     }
 
-    const normalizedJobs = rawJobs.map(normalize)
+    const normalizedJobs = dedup(rawJobs.map(normalize))
     const newJobs = processJobs(normalizedJobs, seenMap, profile)
     allNewJobs.push(...newJobs)
+    allFetchedJobs.push(...normalizedJobs)
 
     const stratPad = strategyName.padEnd(14)
     const fetched  = String(normalizedJobs.length).padStart(4)
@@ -163,13 +243,17 @@ async function main() {
       : C.dim('0 new, relevant')
     console.log(`${label} ${arrow} ${C.cyan(stratPad)} ${arrow} ${fetched} jobs fetched ${arrow} ${newCount}`)
 
+    if (verbose) {
+      normalizedJobs.forEach((j, idx) => console.log(C.dim(`    ${idx + 1}. ${j.title} — ${j.location}`)))
+    }
+
     if (i < total - 1) {
       await new Promise(r => setTimeout(r, Math.random() * 2000 + 2000))
     }
   }
 
-  // Persist updated companies.json (_detectedStrategy / _apiUrl filled in by detector)
-  await writeFile(companiesPath, JSON.stringify(companiesData, null, 2))
+  // Persist updated company files (_detectedStrategy / _apiUrl filled in by detector)
+  await saveCompanies(companiesData)
 
   allNewJobs.sort((a, b) => b.score - a.score)
 
@@ -187,9 +271,22 @@ async function main() {
 
   await saveSeen(seenMap)
 
+  const debugPath = join(outputDir, 'debug_all_fetched.json')
+  await writeFile(debugPath, JSON.stringify(
+    { generatedAt: now.toISOString(), totalFetched: allFetchedJobs.length, jobs: allFetchedJobs },
+    null, 2
+  ))
+
   console.log('─'.repeat(50))
   console.log(C.bold(`Total new relevant jobs: ${C.green(String(allNewJobs.length))}`))
   console.log(`Output: output/jobs_${dateStr}.json\n`)
+
+  try {
+    await sendTelegram(allNewJobs, dateStr)
+    console.log(C.green('Telegram notification sent.'))
+  } catch (err) {
+    console.warn(C.yellow(`Telegram notification failed: ${err.message}`))
+  }
 
   if (allNewJobs.length > 0) {
     console.log('Top results:')

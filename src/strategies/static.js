@@ -34,7 +34,8 @@ export async function scrape(company) {
       const title = titleEl.text().trim() || $el.find('a').first().text().trim()
 
       const locationEl = $el.find('[class*="location"], [class*="city"]').first()
-      const location = locationEl.text().trim()
+      const locationRaw = locationEl.text().trim().split('\n')[0].trim()
+      const location = locationRaw.length <= 80 ? locationRaw : ''
 
       $el.find('a').each((_, a) => {
         const href = $(a).attr('href') || ''

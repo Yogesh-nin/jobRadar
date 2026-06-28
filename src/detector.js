@@ -1,10 +1,5 @@
-import { readFile, writeFile } from 'fs/promises'
-import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { writeFile } from 'fs/promises'
 import { chromium } from 'playwright'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const COMPANIES_PATH = join(__dirname, '..', 'companies.json')
 
 // Checked in order — first match wins
 const ATS_SIGNATURES = [
@@ -86,13 +81,19 @@ async function pageProbe(url) {
 }
 
 async function cacheStrategy(url, strategy, apiUrl, companiesData) {
+  let targetFile = null
   for (const c of companiesData) {
     if (c.url === url) {
       c._detectedStrategy = strategy
       if (apiUrl) c._apiUrl = apiUrl
+      targetFile = c._sourceFile
     }
   }
-  await writeFile(COMPANIES_PATH, JSON.stringify(companiesData, null, 2))
+  if (!targetFile) return
+  const companies = companiesData
+    .filter(c => c._sourceFile === targetFile)
+    .map(({ _sourceFile, ...rest }) => rest)
+  await writeFile(targetFile, JSON.stringify(companies, null, 2))
 }
 
 export async function detect(company, companiesData) {

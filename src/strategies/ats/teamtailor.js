@@ -10,22 +10,25 @@ export async function scrape(company) {
   const subdomain = extractSubdomain(company.url)
   if (!subdomain) throw new Error(`Cannot extract Teamtailor subdomain from ${company.url}`)
 
-  let res
-  try {
-    res = await axios.get('https://api.teamtailor.com/v1/jobs?page[size]=30', {
-      headers: {
-        Authorization: 'Token token=NOT_NEEDED',
-        'X-Api-Version': '20210218'
-      }
-    })
-  } catch (err) {
-    if (err.response?.status === 401) {
-      throw new Error('TEAMTAILOR_AUTH_REQUIRED')
-    }
-    throw err
+  const headers = {
+    Authorization: 'Token token=NOT_NEEDED',
+    'X-Api-Version': '20210218'
   }
 
-  const jobs = res.data.data || []
+  const jobs = []
+  let url = `https://api.teamtailor.com/v1/jobs?page[size]=30`
+
+  while (url) {
+    let res
+    try {
+      res = await axios.get(url, { headers })
+    } catch (err) {
+      if (err.response?.status === 401) throw new Error('TEAMTAILOR_AUTH_REQUIRED')
+      throw err
+    }
+    jobs.push(...(res.data.data || []))
+    url = res.data.links?.next || null
+  }
 
   return jobs.map(j => ({
     id: `${slugify(company.name)}:${j.id}`,
